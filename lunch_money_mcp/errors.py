@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
+from sentry_sdk.integrations.mcp import MCPIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 
 if TYPE_CHECKING:
@@ -55,12 +56,18 @@ def init_error_tracking() -> bool:
             traces_sample_rate=0.0,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "homelab"),
             before_send=_before_send,
+            # Financial records sit in frame locals and request bodies: send neither.
+            include_local_variables=False,
+            max_request_body_size="never",
+            send_default_pii=False,
             integrations=[
                 # Breadcrumbs only: an ERROR log is a handled error.
                 LoggingIntegration(event_level=None),
                 # Only uncaught exceptions, never a 5xx the app returned on purpose.
                 StarletteIntegration(failed_request_status_codes=set()),
             ],
+            # It reports every MCP tool error, and those are handled results.
+            disabled_integrations=[MCPIntegration()],
         )
     except Exception as exc:
         # The class only: a BadDsn message can carry the DSN itself.

@@ -121,3 +121,51 @@ def test_init_failure_logs_the_class_and_never_the_dsn(monkeypatch, caplog):
         assert errors.init_error_tracking() is False
     assert "ValueError" in caplog.text
     assert "secret-key" not in caplog.text
+
+
+def test_a_crash_reaches_sentry_without_frame_locals_or_body(captured):
+    import json
+
+    from starlette.requests import Request
+
+    async def crash(request: Request):
+        record = await request.json()
+        balance_note = record["note"]  # noqa: F841
+        raise RuntimeError("route crashed")
+
+    errors.init_error_tracking()
+    app = Starlette(routes=[Route("/crash", crash, methods=["POST"])])
+    # Built at runtime, so source context around the raise cannot hold it.
+    secret = "-".join(["ACCOUNT", "BALANCE", "4242"])
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.post("/crash", json={"note": secret}).status_code == 500
+    sentry_sdk.flush()
+    assert _values(captured) == ["route crashed"]
+    assert secret not in json.dumps(captured.events)
+
+
+def test_a_raising_mcp_tool_sends_nothing(captured):
+    import anyio
+    from mcp.server.fastmcp import FastMCP
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    errors.init_error_tracking()
+    app = FastMCP("crash-test")
+
+    @app.tool()
+    def broken() -> str:
+        raise ValueError("upstream rejected the category")
+
+    async def call() -> bool:
+        async with create_connected_server_and_client_session(app._mcp_server) as session:
+            result = await session.call_tool("broken", {})
+            return result.isError
+
+    assert anyio.run(call) is True
+    sentry_sdk.flush()
+    assert captured.events == []
+
+
+def test_the_mcp_tool_error_integration_is_disabled(captured):
+    errors.init_error_tracking()
+    assert sentry_sdk.get_client().get_integration("mcp") is None
