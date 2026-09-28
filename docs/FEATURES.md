@@ -12,6 +12,7 @@ What lunch-money-k8s ships today.
 - stdio transport for local clients and streamable HTTP for a Kubernetes
   service, with env-driven host and origin allowlists against DNS rebinding.
 - API client with 429 rate-limit backoff.
+- Crashes, and only crashes, go to Sentry when `SENTRY_DSN` is set (`errors.py`).
 - `scripts/categorize.py` seeds categories and assigns transactions by
   payee-prefix rules from a gitignored `rules.yaml`.
 

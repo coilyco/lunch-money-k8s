@@ -8,6 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
 
 from lunch_money_mcp.client import LunchMoney
+from lunch_money_mcp.errors import init_error_tracking, report_crash
 
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 DEFAULT_ALLOWED_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
@@ -388,11 +389,16 @@ def spending_summary(start_date: str | None = None, end_date: str | None = None)
 
 def main() -> None:
     """Run over stdio, or streamable HTTP when LUNCH_MONEY_MCP_TRANSPORT=http."""
+    init_error_tracking()
     transport = os.environ.get("LUNCH_MONEY_MCP_TRANSPORT", "stdio")
-    if transport in ("http", "streamable-http"):
-        mcp.run(transport="streamable-http")
-    else:
-        mcp.run()
+    try:
+        if transport in ("http", "streamable-http"):
+            mcp.run(transport="streamable-http")
+        else:
+            mcp.run()
+    except Exception as exc:
+        report_crash(exc)
+        raise
 
 
 if __name__ == "__main__":
