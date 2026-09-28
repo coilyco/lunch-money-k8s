@@ -123,28 +123,55 @@ def test_init_failure_logs_the_class_and_never_the_dsn(monkeypatch, caplog):
     assert "secret-key" not in caplog.text
 
 
-def test_a_crash_reaches_sentry_without_frame_locals_or_body(captured):
+# Built at runtime, so source context around a raise cannot hold it.
+SECRET = "-".join(["ACCOUNT", "BALANCE", "4242"])
+
+
+def _leaks(events: list[dict]) -> list[str]:
+    """Every frame var or payload path still holding the secret, for a clear failure."""
     import json
 
+    found = []
+    for event in events:
+        for exc in event.get("exception", {}).get("values", []):
+            for frame in exc.get("stacktrace", {}).get("frames", []):
+                for name, value in (frame.get("vars") or {}).items():
+                    if SECRET in json.dumps(value):
+                        found.append(f"{frame.get('function')}:{name}")
+        for key in ("request", "breadcrumbs", "extra", "contexts"):
+            if SECRET in json.dumps(event.get(key)):
+                found.append(key)
+    return found
+
+
+def test_a_crash_keeps_harmless_locals_and_scrubs_financial_data(captured):
     from starlette.requests import Request
 
     async def crash(request: Request):
         record = await request.json()
-        balance_note = record["note"]  # noqa: F841
+        payee = record["payee"]  # noqa: F841
+        transaction_id = record["transaction_id"]  # noqa: F841
+        logging.getLogger("lunch_money_mcp.test").warning("looking up transaction")
         raise RuntimeError("route crashed")
 
     errors.init_error_tracking()
     app = Starlette(routes=[Route("/crash", crash, methods=["POST"])])
-    # Built at runtime, so source context around the raise cannot hold it.
-    secret = "-".join(["ACCOUNT", "BALANCE", "4242"])
     client = TestClient(app, raise_server_exceptions=False)
-    assert client.post("/crash", json={"note": secret}).status_code == 500
+    body = {"payee": SECRET, "transaction_id": 7711}
+    assert client.post("/crash", json=body).status_code == 500
     sentry_sdk.flush()
-    assert _values(captured) == ["route crashed"]
-    assert secret not in json.dumps(captured.events)
+    (event,) = captured.events
+    assert _leaks(captured.events) == []
+    frame_vars = event["exception"]["values"][-1]["stacktrace"]["frames"][-1]["vars"]
+    # Locals are what make the trace useful, so a harmless one stays readable.
+    assert "7711" in frame_vars["transaction_id"]
+    crumbs = [crumb.get("message") for crumb in event["breadcrumbs"]["values"]]
+    assert "looking up transaction" in crumbs
+    assert event["request"]["method"] == "POST"
+    assert event["request"]["url"].endswith("/crash")
 
 
-def test_a_raising_mcp_tool_sends_nothing(captured):
+def test_a_raising_mcp_tool_is_reported_with_its_arguments_scrubbed(captured):
     import anyio
     from mcp.server.fastmcp import FastMCP
     from mcp.shared.memory import create_connected_server_and_client_session
@@ -153,19 +180,23 @@ def test_a_raising_mcp_tool_sends_nothing(captured):
     app = FastMCP("crash-test")
 
     @app.tool()
-    def broken() -> str:
-        raise ValueError("upstream rejected the category")
+    def broken(payee: str) -> str:
+        raise ValueError("upstream rejected the payee")
 
     async def call() -> bool:
         async with create_connected_server_and_client_session(app._mcp_server) as session:
-            result = await session.call_tool("broken", {})
+            result = await session.call_tool("broken", {"payee": SECRET})
             return result.isError
 
     assert anyio.run(call) is True
     sentry_sdk.flush()
-    assert captured.events == []
+    assert len(captured.events) >= 1
+    assert _leaks(captured.events) == []
 
 
-def test_the_mcp_tool_error_integration_is_disabled(captured):
+def test_the_mcp_integration_is_on_and_pii_is_off(captured):
     errors.init_error_tracking()
-    assert sentry_sdk.get_client().get_integration("mcp") is None
+    client = sentry_sdk.get_client()
+    assert client.get_integration("mcp") is not None
+    # The MCP integration records tool arguments and results only with PII on.
+    assert client.options["send_default_pii"] is False

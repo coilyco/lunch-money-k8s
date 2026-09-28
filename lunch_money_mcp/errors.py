@@ -1,7 +1,7 @@
 """Crash reporting to Sentry, crashes only (teable:coilyco/deploy#8347).
 
-Handled errors, including a tool call FastMCP turns into a tool error, never
-reach Sentry, to keep inside the shared free quota. Off unless SENTRY_DSN is set.
+Every integration stays on so a crash is fully annotated, and the keys that
+hold financial data are scrubbed wherever they appear. Off unless SENTRY_DSN is set.
 """
 
 from __future__ import annotations
@@ -13,13 +13,51 @@ from typing import TYPE_CHECKING, Any
 
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
-from sentry_sdk.integrations.mcp import MCPIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
+from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
 
 if TYPE_CHECKING:
     from sentry_sdk.types import Event
 
 SENTRY_EVENTS_PER_MINUTE = 20
+# Frame locals and request bodies stay on, because they make a crash readable.
+# These keys hold financial or account data and are scrubbed wherever they appear.
+USER_DATA_KEYS = [
+    "transactions",
+    "transaction",
+    "payee",
+    "amount",
+    "to_base",
+    "price",
+    "balance",
+    "notes",
+    "note",
+    "account",
+    "accounts",
+    "plaid_accounts",
+    "institution_name",
+    "display_name",
+    "name",
+    "original_name",
+    "description",
+    "merchant",
+    "category",
+    "categories",
+    "budget",
+    "budgets",
+    "splits",
+    "payload",
+    "fields",
+    "body",
+    # FastMCP's frames hold tool arguments as a model repr no key reaches inside.
+    "arguments",
+    "arguments_parsed_model",
+    "arguments_parsed_dict",
+    "arguments_to_validate",
+    "arguments_to_pass_directly",
+]
+_SCRUBBED = {key.lower() for key in USER_DATA_KEYS}
+_MCP_ARGUMENT = "mcp.request.argument."
 _log = logging.getLogger(__name__)
 _initialized = False
 _active = False
@@ -37,8 +75,22 @@ def _within_budget(now: float) -> bool:
     return True
 
 
+def _scrub_mcp_arguments(event: Event) -> None:
+    """The MCP integration puts tool arguments on the trace context, which the
+    EventScrubber never visits, so the user-data ones are filtered here."""
+    data = event.get("contexts", {}).get("trace", {}).get("data")
+    if not isinstance(data, dict):
+        return
+    for key in list(data):
+        if key.startswith(_MCP_ARGUMENT) and key[len(_MCP_ARGUMENT) :].lower() in _SCRUBBED:
+            data[key] = "[Filtered]"
+
+
 def _before_send(event: Event, _hint: dict[str, Any]) -> Event | None:
-    return event if _within_budget(time.monotonic()) else None
+    if not _within_budget(time.monotonic()):
+        return None
+    _scrub_mcp_arguments(event)
+    return event
 
 
 def init_error_tracking() -> bool:
@@ -56,18 +108,16 @@ def init_error_tracking() -> bool:
             traces_sample_rate=0.0,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "homelab"),
             before_send=_before_send,
-            # Financial records sit in frame locals and request bodies: send neither.
-            include_local_variables=False,
-            max_request_body_size="never",
             send_default_pii=False,
+            event_scrubber=EventScrubber(
+                denylist=DEFAULT_DENYLIST + USER_DATA_KEYS, recursive=True
+            ),
             integrations=[
                 # Breadcrumbs only: an ERROR log is a handled error.
                 LoggingIntegration(event_level=None),
                 # Only uncaught exceptions, never a 5xx the app returned on purpose.
                 StarletteIntegration(failed_request_status_codes=set()),
             ],
-            # It reports every MCP tool error, and those are handled results.
-            disabled_integrations=[MCPIntegration()],
         )
     except Exception as exc:
         # The class only: a BadDsn message can carry the DSN itself.
