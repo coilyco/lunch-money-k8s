@@ -15,14 +15,11 @@ The chart defaults to `docker.io/coilysiren/lunch-money-k8s`. Override
 
 ## Continuous integration
 
-Canonical CI runs on Forgejo. Every push to `main` runs the app tests, lints and
-renders the chart, then publishes and verifies the private
-single-architecture image as
-`forgejo.coilysiren.me/coilyco-flight-deck/lunch-money-mcp:<full-source-sha>`.
-The trusted deploy runner receives the package-write credential. The fleet
-deployment uses a separate package-read credential and consumes that exact
-immutable reference. GitHub remains a PR mirror and does not publish the fleet
-image.
+CI runs on GitHub Actions. Every push to `main` runs the app tests, lints and
+renders the chart, then publishes and verifies the single-architecture image as
+`ghcr.io/coilyco/lunch-money-mcp:<full-source-sha>` with the job's `GITHUB_TOKEN`
+and `packages: write`. This repo holds no cluster credentials. Flux applies the
+rollout from `coilyco/deploy` and consumes that exact immutable reference.
 
 ## Categorization rules
 

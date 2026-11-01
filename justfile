@@ -55,7 +55,7 @@ precommit *ARGS:
 docker *ARGS:
     @docker build -t docker.io/coilysiren/lunch-money-k8s:dev . "$@"
 
-# Validate the trusted Forgejo OCI publisher shell contract.
+# Validate the trusted GHCR publisher shell contract.
 check-publish *ARGS:
     @bash -n scripts/publish-image.sh "$@"
 
